@@ -65,7 +65,7 @@ This is an experimental migration tool, not a pixel-perfect Freeform renderer. I
 | Shapes | Native Bézier paths become editable, resizable draw.io stencils. |
 | Text | Editable labels, native dominant font size/style and alignment. Mixed character formatting is simplified. Platform font defaults and shrink-to-fit are approximate. |
 | Straight lines | Preserved even when their native frame has zero width or height. |
-| Connectors | Editable contours with reconstructed smoothing. They do **not** automatically attach or reroute when a node moves. Arrowheads and exact routing may differ. |
+| Connectors | Editable contours with reconstructed smoothing. They do **not** automatically attach or reroute when a node moves. Archived arrowhead paths are preserved at their endpoints. Exact routing may differ. |
 | Groups | Flattened into objects, with ancestral translation/rotation applied. Native layer order, group scaling/flips and complex transforms may differ. |
 | Images | Embedded locally; PNG, JPEG, GIF, WebP and SVG. TIFF/HEIC use macOS `sips` for PNG conversion. Crops and masks are approximated by the frame and reported. |
 | Parametric shapes | Bounding-rectangle approximation with a warning. Editable Bézier sources are preserved. |
@@ -82,6 +82,6 @@ python3 -m unittest discover -s tests -v
 python3 examples/make_demo.py
 ```
 
-Tests use synthetic data only: Unicode, malformed protobuf, zero-extent lines, HTML text escaping, embedded images, duplicate board titles, output protection and WAL-aware snapshots. `examples/demo.drawio` is entirely artificial. No personal Freeform captures are included.
+Tests use synthetic data only: Unicode, malformed protobuf, zero-extent lines, HTML text escaping, embedded images, duplicate board titles, output protection, WAL-aware snapshots, native rotation direction, head/tail arrowheads and Unicode line separators. `examples/demo.drawio` is entirely artificial. No personal Freeform captures are included.
 
 MIT license. Adapted schema mappings retain the upstream MIT notice in `THIRD_PARTY_NOTICES`.

@@ -3,6 +3,7 @@ import base64
 import contextlib
 import io
 import json
+import math
 import pathlib
 import sqlite3
 import struct
@@ -61,6 +62,55 @@ class ConverterTests(unittest.TestCase):
         cell=diagram.find('.//mxCell[@id="shape-text"]')
         self.assertEqual(cell.get('value'),'A &amp; &lt;B&gt;<br>Вторая строка')
         self.assertIn('fontColor=#000000;',cell.get('style'));self.assertIn('whiteSpace=nowrap;',cell.get('style'))
+
+    def test_native_rotation_turns_down_right_not_up_right(self):
+        # Native 315 degrees must become draw.io +45 degrees. Both use a
+        # centered frame, so a 100pt horizontal line then runs down/right.
+        item=shape();item['geometry']['rotation']=315
+        diagram,_=export_board({'id':'b','title':'Rotation','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        c=diagram.find('.//mxCell[@id="shape"]')
+        style=dict(part.split('=',1) for part in c.get('style').split(';') if '=' in part)
+        angle=math.radians(float(style['rotation']))
+        self.assertAlmostEqual(math.cos(angle)*100,math.sqrt(5000))
+        self.assertAlmostEqual(math.sin(angle)*100,math.sqrt(5000))
+        item['geometry']['rotation']=270
+        diagram,_=export_board({'id':'b','title':'Rotation','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        c=diagram.find('.//mxCell[@id="shape"]')
+        style=dict(part.split('=',1) for part in c.get('style').split(';') if '=' in part)
+        self.assertAlmostEqual(math.sin(math.radians(float(style['rotation']))),1)
+
+    def test_head_and_tail_arrowheads_follow_opposite_tangents(self):
+        item=shape()
+        triangle=pb(1,b'')+pb(1,pv(1,1)+pb(2,struct.pack('<ff',3,6)))+pb(1,pv(1,1)+pb(2,struct.pack('<ff',6,0)))+pb(1,pv(1,3))
+        desc={'0':{'bytes':triangle.hex()},'2':point(3,0),'4':'simple arrow'}
+        item['specific']['a']['a'].update(c=desc,d=desc)
+        diagram,report=export_board({'id':'b','title':'Arrows','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        c=diagram.find('.//mxCell[@id="shape"]');encoded=c.get('style').split('stencil(',1)[1].split(')',1)[0]
+        paths=E.fromstring(zlib.decompress(base64.b64decode(encoded),-15)).findall('./foreground/path')
+        self.assertEqual(report['counts']['arrowheads'],2);self.assertEqual(len(paths),3)
+        head=[(float(n.get('x')),float(n.get('y'))) for n in paths[1] if 'x' in n.attrib]
+        tail=[(float(n.get('x')),float(n.get('y'))) for n in paths[2] if 'x' in n.attrib]
+        # Tip at endpoint; the head base is to its left, tail base to its right.
+        self.assertEqual(max(x for x,y in head),100)
+        self.assertEqual(min(x for x,y in tail),0)
+        self.assertAlmostEqual(min(x for x,y in head),94)
+        self.assertAlmostEqual(max(x for x,y in tail),6)
+        self.assertEqual(len(E.fromstring(zlib.decompress(base64.b64decode(encoded),-15)).findall('./foreground/fillstroke')),2)
+        # A filled node must not hide an arrow that intentionally ends inside it.
+        node=shape(id='node',width=80,height=80)
+        node['specific']['a']['a']['a']={'0':0,'1':{'1':{'0':0,'1':.5,'2':.5,'3':1}}}
+        diagram,_=export_board({'id':'b','title':'Layers','items':[item,node],'warnings':[]},pathlib.Path('/nonexistent'))
+        ids=[c.get('id') for c in diagram.findall('.//mxCell')]
+        self.assertLess(ids.index('node'),ids.index('shape'))
+        item['specific']['a']['a']['c']={'4':'none'}
+        _,report=export_board({'id':'b','title':'Tail only','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        self.assertEqual(report['counts']['arrowheads'],1)
+        self.assertEqual(report['warnings'],[])
+
+    def test_unicode_paragraph_separators_become_visible_line_breaks(self):
+        item=shape(text='First\u2028Second\u2029Third',width=100,height=50)
+        diagram,_=export_board({'id':'b','title':'Text','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        self.assertEqual(diagram.find('.//mxCell[@id="shape-text"]').get('value'),'First<br>Second<br>Third')
 
     def test_image_is_embedded_without_external_url(self):
         with tempfile.TemporaryDirectory() as td:

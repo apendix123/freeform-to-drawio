@@ -2,6 +2,7 @@
 import base64, collections, html, json, math, mimetypes, pathlib, struct, subprocess, tempfile, zlib
 import xml.etree.ElementTree as E
 from .coherence import get, point, wire, first
+from . import __version__
 def pair(b):
  return (0,0) if not b else struct.unpack('<ff' if len(b)==8 else '<ee',b)
 def commands(source):
@@ -83,14 +84,83 @@ def text_metrics(item,natural):
     fontstyle=int(bool(bold))+2*int(bool(italic))+4*int(bool(underline))+8*int(bool(strike))
     return float(fs),fontstyle,align
 
-def stencil(cmd,natural,fill):
+def stencil(cmd,natural,fill,markers=(),marker_color=None):
     w,h=natural;s=E.Element('shape',w=str(w),h=str(h),aspect='variable',strokewidth='inherit')
     E.SubElement(s,'background');fg=E.SubElement(s,'foreground');p=E.SubElement(fg,'path')
     names={'move':['x','y'],'line':['x','y'],'curve':['x1','y1','x2','y2','x3','y3'],'close':[]}
     for c in cmd:E.SubElement(p,c[0],dict(zip(names[c[0]],map(str,c[1:]))))
     E.SubElement(fg,'fillstroke' if fill!='none' else 'stroke')
+    for marker in markers:
+        E.SubElement(fg,'save')
+        E.SubElement(fg,'fillcolor',color=marker_color or '#000000')
+        E.SubElement(fg,'strokecolor',color=marker_color or '#000000')
+        p=E.SubElement(fg,'path')
+        for c in marker:E.SubElement(p,c[0],dict(zip(names[c[0]],map(str,c[1:]))))
+        E.SubElement(fg,'fillstroke')
+        E.SubElement(fg,'restore')
     co=zlib.compressobj(wbits=-15)
     return base64.b64encode(co.compress(E.tostring(s))+co.flush()).decode()
+
+def path_endpoints(cmd):
+    """Return endpoint positions and outward unit tangents for an open path."""
+    segments=[];current=None
+    for command in cmd:
+        if command[0]=='move':current=command[1:]
+        elif command[0] in ('line','curve') and current is not None:
+            end=command[-2:]
+            controls=[command[1:3],command[3:5]] if command[0]=='curve' else []
+            segments.append((current,end,controls));current=end
+    if not segments:return None
+    start,end,controls=segments[0]
+    following=next((p for p in controls+[end] if math.dist(start,p)>1e-9),None)
+    before,last,controls=segments[-1]
+    previous=next((p for p in list(reversed(controls))+[before] if math.dist(last,p)>1e-9),None)
+    if following is None or previous is None:return None
+    def unit(a,b):
+        length=math.dist(a,b)
+        return ((b[0]-a[0])/length,(b[1]-a[1])/length)
+    return (start,unit(following,start)),(last,unit(previous,last))
+
+
+def line_markers(item,cmd,natural,frame):
+    """Place separately archived arrowhead paths along physical endpoint tangents.
+
+    Native line-end paths point along +Y; their coding key 2 is the base anchor.
+    Their furthest +Y coordinate is the tip. Geometry scale is cancelled so that
+    line-end dimensions remain in points, independently of the body frame.
+    """
+    style_node=get(item,'specific','a','a','a') if item['kind']=='sticky' else get(item,'specific','a','a')
+    ends=path_endpoints(cmd)
+    if not ends:return [],[]
+    sx=frame[0]/natural[0];sy=frame[1]/natural[1]
+    result=[];warnings=[]
+    for key,index in (('c',1),('d',0)):
+        descriptor=get(style_node,key)
+        if not descriptor or get(descriptor,4)=='none':continue
+        raw=get(descriptor,0,'bytes')
+        if not raw:
+            warnings.append('Line end has no supported archived path')
+            continue
+        marker,_=commands({'6':{'0':{'bytes':raw},'1':{'bytes':''}}})
+        if not marker:continue
+        anchor=point(get(descriptor,2)) or [0,0]
+        coordinates=[c[k:k+2] for c in marker for k in range(1,len(c),2)]
+        tip_y=max(p[1] for p in coordinates)
+        endpoint,tangent=ends[index]
+        dx,dy=tangent[0]*sx,tangent[1]*sy;length=math.hypot(dx,dy)
+        if length<1e-9:continue
+        ux,uy=dx/length,dy/length;nx,ny=-uy,ux
+        transformed=[]
+        for c in marker:
+            values=[]
+            for k in range(1,len(c),2):
+                across=c[k]-anchor[0];along=c[k+1]-tip_y
+                values.extend((endpoint[0]+(nx*across+ux*along)/sx,
+                               endpoint[1]+(ny*across+uy*along)/sy))
+            transformed.append((c[0],*values))
+        result.append(transformed)
+    return result,warnings
+
 
 def cell(root,id,value,sty,box):
     x,y,w,h=box
@@ -130,16 +200,20 @@ def export_board(board,store):
             parent=p['parent']
         return chain
     def world(item,x,y):
-        angle=item['geometry'].get('rotation',0)
+        angle=-item['geometry'].get('rotation',0)
         for group in ancestors(item):
             g=group.get('geometry')
             if not g:continue
             # Native group coordinates are affine local coordinates; unit group frames
             # do not provide bounds. Preserve translation and rotation, flatten hierarchy.
-            theta=math.radians(g.get('rotation',0));x,y=x*math.cos(theta)-y*math.sin(theta)+g['x'],x*math.sin(theta)+y*math.cos(theta)+g['y'];angle+=g.get('rotation',0)
+            theta=math.radians(-g.get('rotation',0));x,y=x*math.cos(theta)-y*math.sin(theta)+g['x'],x*math.sin(theta)+y*math.cos(theta)+g['y'];angle-=g.get('rotation',0)
         return x,y,angle
     def layer(i):
         if i.get('text') and i.get('geometry',{}).get('width')==0:return 3
+        # Decorated line endpoints can deliberately lie inside filled nodes.
+        # Draw their body and marker above fills instead of hiding arrow tips.
+        style_node=get(i,'specific','a','a','a') if i['kind']=='sticky' else get(i,'specific','a','a')
+        if get(style_node,'c') or get(style_node,'d'):return 2.5
         if i['kind']=='connector':return 1
         if i['kind']=='image':return 2
         return 2 if style(i)[0]!='none' else 0
@@ -199,7 +273,10 @@ def export_board(board,store):
                 pathtransform=transform
                 if get(source,0):pathtransform+='flipH=1;'
                 if get(source,1):pathtransform+='flipV=1;'
-                sty=f'shape=stencil({stencil(cmd,natural,fill)});fillColor={fill};strokeColor={stroke};strokeWidth={width};'+pathtransform
+                markers,marker_warnings=line_markers(item,cmd,natural,(w,h))
+                for message in marker_warnings:warn(item,message)
+                if markers:stats['arrowheads']+=len(markers)
+                sty=f'shape=stencil({stencil(cmd,natural,fill,markers,stroke)});fillColor={fill};strokeColor={stroke};strokeWidth={width};'+pathtransform
                 cell(root,item['id'],'',sty,(x,y,w,h));stats['paths']+=1
             if zero and item.get('text') == '':
                 cell(root,item['id'],'','text;fillColor=none;strokeColor=none;fontColor=#000000;',(x,y,w,h))
@@ -212,7 +289,7 @@ def export_board(board,store):
                     longest=max(map(len,item['text'].splitlines()),default=1)
                     size=min(size,max(5,(w-2*inset)/(max(longest,1)*.55)),max(5,(h-2*inset)/(max(len(item['text'].splitlines()),1)*1.2)))
                 # HTML preserves explicit line breaks without rewrapping standalone labels.
-                val=html.escape(item['text']).replace('\n','<br>')
+                val='<br>'.join(html.escape(line) for line in item['text'].splitlines())
                 sty=f'text;html=1;whiteSpace=nowrap;overflow=visible;strokeColor=none;fillColor=none;fontColor=#000000;fontFamily=Helvetica;fontSize={size};fontStyle={fs};align={align};verticalAlign=middle;spacing=0;'+transform
                 cell(root,item['id']+'-text',val,sty,(x,y,w,h));stats['texts']+=1
         except (ValueError,IndexError,KeyError,TypeError,struct.error,subprocess.SubprocessError,OSError) as exc:
@@ -225,6 +302,6 @@ def export_board(board,store):
     return diagram,{'id':board['id'],'title':board['title'],'source_items':len(board['items']),'counts':dict(stats),'warnings':warnings}
 
 def write_file(diagrams,path):
-    root=E.Element('mxfile',host='freeform-to-drawio',version='0.1.0')
+    root=E.Element('mxfile',host='freeform-to-drawio',version=__version__)
     for d in diagrams:root.append(d)
     E.indent(root);E.ElementTree(root).write(path,encoding='utf-8',xml_declaration=True)

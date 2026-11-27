@@ -15,7 +15,7 @@ import zlib
 
 from freeform_to_drawio.cli import main
 from freeform_to_drawio.coherence import Document, wire
-from freeform_to_drawio.drawio import export_board, stencil, colored_text
+from freeform_to_drawio.drawio import export_board, stencil, colored_text, drawing_order
 from freeform_to_drawio.store import snapshot
 
 def vi(n):
@@ -156,6 +156,65 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(value,'Plain');self.assertEqual(fallback,'#ff8000');self.assertTrue(colored)
         item['text_attributes']=[{'length':5,'attributes':{'characterFill':{'0':0,'1':{'0':.5,'1':{'0':0,'1':0,'2':0,'3':0}}}}}]
         self.assertIn('opacity:0.5;',colored_text(item)[0])
+
+    def test_ordered_set_tree_order_and_persistent_tombstone(self):
+        a,b=uuid.UUID(int=1),uuid.UUID(int=2)
+        constants=pb(1,uuid.UUID(int=99).bytes+a.bytes+b.bytes)
+        doc=Document(b'crdt\x06\0\0\0'+pb(6,constants))
+        entries=pb(4,pb(1,pv(6,1)))+pb(4,pb(1,pv(6,2)))
+        # The sequence tree orders the third segment before the second.
+        # The middle segment has no added stamp, and is elided in SQLite.
+        root=pb(4,bytes([3,1,2]))
+        tombstone=pv(2,7)
+        first=pv(2,1)+pb(3,pv(2,1))
+        second=pv(2,1)+pb(3,pv(2,2))
+        sequence=b''.join(pb(3,v) for v in (root,tombstone,first,second))+pb(4,b'')
+        ordered=pb(1,entries)+pb(2,sequence)+pb(3,pv(2,1))+pb(3,pv(2,2))
+        self.assertEqual(doc.ordered_values(ordered),[str(b),str(a)])
+
+    def test_ordered_set_resolves_duplicate_timestamps(self):
+        a,b=uuid.UUID(int=1),uuid.UUID(int=2)
+        doc=Document(b'crdt\x06\0\0\0'+pb(6,pb(1,uuid.UUID(int=99).bytes+a.bytes+b.bytes)))
+        entries=b''.join(pb(4,pb(1,pv(6,k))) for k in (1,2,1))
+        sequence=pb(3,pv(2,3)+pb(3,pv(2,1)))
+        ordered=pb(1,entries)+pb(2,sequence)+b''.join(pb(3,pv(2,n)) for n in (1,2,3))
+        self.assertEqual(doc.ordered_values(ordered),[str(b),str(a)])
+
+    def test_ordered_set_version_vector_removes_visible_content(self):
+        a,b=uuid.UUID(int=1),uuid.UUID(int=2)
+        doc=Document(b'crdt\x06\0\0\0'+pb(6,pb(1,uuid.UUID(int=99).bytes+a.bytes+b.bytes)))
+        entries=b''.join(pb(4,pb(1,pv(6,k))) for k in (1,2))
+        removed=pb(1,b'\0')+pb(2,pb(2,vi(0)+vi(2)))
+        sequence=pb(3,pb(4,b'\x01\x02'))+pb(3,pv(2,1)+pb(3,pv(2,1))+pb(5,removed))+pb(3,pv(2,1)+pb(3,pv(2,2)))
+        ordered=pb(1,entries)+pb(2,sequence)+pb(3,pv(2,1))+pb(3,pv(2,2))
+        self.assertEqual(doc.ordered_values(ordered),[str(b)])
+
+    def test_native_group_order_wins_over_item_type_sorting(self):
+        root={'id':'root','kind':'container','parent':None,'child_ids':['image','nested']}
+        group={'id':'nested','kind':'container','parent':'root','child_ids':['overlay','label']}
+        image={'id':'image','kind':'image','parent':'root'}
+        overlay={'id':'overlay','kind':'shape','parent':'nested'}
+        label={'id':'label','kind':'shape','parent':'nested'}
+        ordered,mode,warnings=drawing_order({'root_container':'root','items':[label,group,overlay,image,root]},lambda i:i['id'])
+        self.assertEqual([i['id'] for i in ordered],['root','image','nested','overlay','label'])
+        self.assertEqual(mode,'native');self.assertEqual(warnings,[])
+        group['child_ids']=['overlay']
+        _,mode,warnings=drawing_order({'root_container':'root','items':[label,group,overlay,image,root]},lambda i:i['id'])
+        self.assertEqual(mode,'partial');self.assertTrue(warnings)
+
+    def test_fill_and_stroke_opacity_are_independent(self):
+        item=shape(width=100,height=50)
+        native=item['specific']['a']['a']
+        native['a']={'0':0,'1':{'0':.25,'1':{'0':0,'1':1,'2':0,'3':0}}}
+        native['b']['1']['0']=.5
+        diagram,report=export_board({'id':'b','title':'Opacity','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        style=diagram.find('.//mxCell[@id="shape"]').get('style')
+        self.assertIn('fillOpacity=25;',style);self.assertIn('strokeOpacity=50;',style)
+        self.assertEqual(report['counts']['transparent_fills'],1)
+        self.assertEqual(report['counts']['transparent_strokes'],1)
+        native['a']['1']['0']=0
+        diagram,_=export_board({'id':'b','title':'Invisible fill','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        self.assertIn('fillOpacity=0;',diagram.find('.//mxCell[@id="shape"]').get('style'))
 
     def test_image_is_embedded_without_external_url(self):
         with tempfile.TemporaryDirectory() as td:

@@ -67,12 +67,12 @@ This is an experimental migration tool, not a pixel-perfect Freeform renderer. I
 | Dashes and dots | Native relative dash patterns, round caps for dots, and stroke joins. Nonzero dash phase is reported as unsupported. Arrowheads stay solid. |
 | Straight lines | Preserved even when their native frame has zero width or height. |
 | Connectors | Editable contours with reconstructed smoothing. They do **not** automatically attach or reroute when a node moves. Archived arrowhead paths are preserved at their endpoints. Exact routing may differ. |
-| Groups | Flattened into objects, with ancestral translation/rotation applied. Native layer order, group scaling/flips and complex transforms may differ. |
+| Groups | Flattened into objects, with ancestral translation/rotation applied. Native ordered-set paint order is preserved while flattening groups. Group scaling/flips and complex transforms may differ. Missing/incomplete order falls back with a report entry. |
 | Images | Embedded locally; PNG, JPEG, GIF, WebP and SVG. TIFF/HEIC use macOS `sips` for PNG conversion. Crops and masks are approximated by the frame and reported. |
 | Parametric shapes | Bounding-rectangle approximation with a warning. Editable Bézier sources are preserved. |
 | Sticky notes | Shape and text are exported; shadows are simplified/omitted. |
 | Ink, tables, media and unknown kinds | Partial or unsupported. Unsupported item kinds become visible labelled placeholders. Failures and missing assets are recorded in the report. |
-| Colors | Basic RGB/gray colors; wide-gamut conversion, alpha, shadows and advanced strokes are approximate or omitted. |
+| Colors and transparency | Basic RGB/gray colors, per-run text opacity, independent fill/stroke opacity. Wide-gamut conversion, shadows and advanced strokes are approximate or omitted. |
 
 A completed run does not imply every object was faithfully converted. Always inspect `report.json`, especially `failed` and `placeholders`, and compare important boards against Freeform or a PDF export. Keep the source snapshot.
 
@@ -83,6 +83,6 @@ python3 -m unittest discover -s tests -v
 python3 examples/make_demo.py
 ```
 
-Tests use synthetic data only: Unicode, malformed protobuf, zero-extent lines, HTML text escaping, embedded images, duplicate board titles, output protection, WAL-aware snapshots, native rotation direction, head/tail arrowheads Unicode line separators, dash/dot patterns, colored UTF-16 runs and text opacity. `examples/demo.drawio` is entirely artificial. No personal Freeform captures are included.
+Tests use synthetic data only: Unicode, malformed protobuf, zero-extent lines, HTML text escaping, embedded images, duplicate board titles, output protection, WAL-aware snapshots, native rotation direction, head/tail arrowheads Unicode line separators, dash/dot patterns, colored UTF-16 runs, transparency, ordered group traversal, duplicate ordered-set timestamps and persistent tombstones. `examples/demo.drawio` is entirely artificial. No personal Freeform captures are included.
 
 MIT license. Adapted schema mappings retain the upstream MIT notice in `THIRD_PARTY_NOTICES`.

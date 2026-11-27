@@ -138,7 +138,7 @@ def text_metrics(item,natural):
     fontstyle=int(bool(bold))+2*int(bool(italic))+4*int(bool(underline))+8*int(bool(strike))
     return float(fs),fontstyle,align
 
-def stencil(cmd,natural,fill,markers=(),marker_color=None,stroke_settings=None):
+def stencil(cmd,natural,fill,markers=(),marker_color=None,stroke_settings=None,marker_alpha=1):
     w,h=natural;s=E.Element('shape',w=str(w),h=str(h),aspect='variable',strokewidth='inherit')
     E.SubElement(s,'background');fg=E.SubElement(s,'foreground')
     if stroke_settings:
@@ -156,6 +156,7 @@ def stencil(cmd,natural,fill,markers=(),marker_color=None,stroke_settings=None):
         E.SubElement(fg,'save')
         E.SubElement(fg,'dashed',dashed='0')
         E.SubElement(fg,'fillcolor',color=marker_color or '#000000')
+        E.SubElement(fg,'fillalpha',alpha=str(marker_alpha))
         E.SubElement(fg,'strokecolor',color=marker_color or '#000000')
         p=E.SubElement(fg,'path')
         for c in marker:E.SubElement(p,c[0],dict(zip(names[c[0]],map(str,c[1:]))))
@@ -247,6 +248,50 @@ def image_data(path):
     else:raise ValueError('Unsupported image format: '+path.suffix)
     return 'data:'+mime+','+base64.b64encode(data).decode()
 
+def shape_opacity(item):
+    node=get(item,'specific','a','a','a') if item['kind']=='sticky' else get(item,'specific','a','a')
+    def alpha(native):
+        value=get(native,0)
+        if value is None:return 1.0
+        if not isinstance(value,(int,float)) or not math.isfinite(value) or not 0<=value<=1:
+            raise ValueError('Invalid native color opacity')
+        return value
+    return alpha(get(node,'a',1)),alpha(get(node,'b',1))
+
+
+def drawing_order(board,fallback_key):
+    """Flatten native ordered groups without replacing their paint order by type."""
+    items={i['id']:i for i in board['items']}
+    root=board.get('root_container')
+    if root not in items:return sorted(board['items'],key=fallback_key),'heuristic',[]
+    result=[];seen=set();active=set();warnings=[]
+    children=collections.defaultdict(list)
+    for item in board['items']:children[item['parent']].append(item)
+    def visit(item):
+        key=item['id']
+        if key in active:raise ValueError('Cyclic native child order')
+        if key in seen:return
+        active.add(key);seen.add(key);result.append(item)
+        if item['kind']=='container':
+            expected=children[key];listed=item.get('child_ids')
+            if listed is None and expected:
+                warnings.append({'item':key,'message':'Native child order unavailable; using approximate order for this group'})
+            for child in listed or []:
+                if child in items and items[child]['parent']==key:visit(items[child])
+            remaining=[child for child in expected if child['id'] not in seen]
+            if listed is not None and remaining:
+                warnings.append({'item':key,'message':'Native child order incomplete; appended unlisted children'})
+            for child in sorted(remaining,key=fallback_key):visit(child)
+        active.remove(key)
+    visit(items[root])
+    alternate=board.get('alternate_container')
+    if alternate in items:visit(items[alternate])
+    remaining=[item for item in board['items'] if item['id'] not in seen]
+    if remaining:warnings.append({'item':root,'message':'Objects outside native root order appended approximately'})
+    for item in sorted(remaining,key=fallback_key):visit(item)
+    return result,'native' if not warnings else 'partial',warnings
+
+
 def export_board(board,store):
     diagram=E.Element('diagram',name=board['title'],id=board['id'])
     model=E.SubElement(diagram,'mxGraphModel',grid='1',gridSize='10',page='0',adaptiveColors='none',background='#ffffff')
@@ -280,7 +325,9 @@ def export_board(board,store):
         if i['kind']=='connector':return 1
         if i['kind']=='image':return 2
         return 2 if style(i)[0]!='none' else 0
-    for item in sorted(board['items'],key=layer):
+    ordered_items,order_mode,order_warnings=drawing_order(board,layer)
+    warnings.extend(order_warnings)
+    for item in ordered_items:
         if item['kind']=='container':stats['containers_flattened']+=1;continue
         try:
             if item.get('error'):raise ValueError(item['error'])
@@ -332,6 +379,7 @@ def export_board(board,store):
                 warn(item,'Missing cached text bounds; estimated from font size')
             if w<=0 or h<=0:raise ValueError('Nonpositive frame')
             fill,stroke,width=style(item)
+            fill_alpha,stroke_alpha=shape_opacity(item)
             if cmd and not zero:
                 pathtransform=transform
                 if get(source,0):pathtransform+='flipH=1;'
@@ -342,8 +390,10 @@ def export_board(board,store):
                 stroke_settings=stroke_options(item)
                 if stroke_settings['dash']:stats['dashed_paths']+=1
                 if stroke_settings['phase']:warn(item,'Nonzero dash phase is not supported')
-                sty=f'shape=stencil({stencil(cmd,natural,fill,markers,stroke,stroke_settings)});fillColor={fill};strokeColor={stroke};strokeWidth={width};'+pathtransform
+                sty=f'shape=stencil({stencil(cmd,natural,fill,markers,stroke,stroke_settings,stroke_alpha)});fillColor={fill};strokeColor={stroke};strokeWidth={width};fillOpacity={fill_alpha*100:g};strokeOpacity={stroke_alpha*100:g};'+pathtransform
                 cell(root,item['id'],'',sty,(x,y,w,h));stats['paths']+=1
+                if fill!='none' and fill_alpha<1:stats['transparent_fills']+=1
+                if stroke!='none' and stroke_alpha<1:stats['transparent_strokes']+=1
             if zero and item.get('text') == '':
                 cell(root,item['id'],'','text;fillColor=none;strokeColor=none;fontColor=#000000;',(x,y,w,h))
                 stats['empty_labels']+=1
@@ -368,7 +418,7 @@ def export_board(board,store):
     dx=40-min((float(g.get('x')) for g in geometries),default=0)
     dy=40-min((float(g.get('y')) for g in geometries),default=0)
     for g in geometries:g.set('x',str(float(g.get('x'))+dx));g.set('y',str(float(g.get('y'))+dy))
-    return diagram,{'id':board['id'],'title':board['title'],'source_items':len(board['items']),'counts':dict(stats),'warnings':warnings}
+    return diagram,{'id':board['id'],'title':board['title'],'source_items':len(board['items']),'layer_order':order_mode,'counts':dict(stats),'warnings':warnings}
 
 def write_file(diagrams,path):
     root=E.Element('mxfile',host='freeform-to-drawio',version=__version__)

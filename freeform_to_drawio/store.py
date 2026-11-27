@@ -46,7 +46,8 @@ def read_boards(store):
     with readonly(pathlib.Path(store)/'boards.db') as db:
         for bid, data in db.execute('SELECT board_identifier,data FROM boards WHERE tombstoned=0 ORDER BY hex(board_identifier)'):
             metadata = Document(data).root()
-            board = {'id':uid(bid),'title':get(metadata,'c') or 'Untitled','items':[],'warnings':[]}
+            board = {'id':uid(bid),'title':get(metadata,'c') or 'Untitled','items':[],'warnings':[],
+                     'root_container':get(metadata,'b','a'),'alternate_container':get(metadata,'b','b')}
             for iid,parent,typ,common,specific in db.execute('SELECT item_uuid,parent_uuid,item_type,common_data,specific_data FROM board_items WHERE board_identifier=? AND tombstoned=0 ORDER BY hex(item_uuid)',(bid,)):
                 item = {'id':uid(iid),'parent':uid(parent) if parent else None,'type':typ,'kind':KINDS.get(typ,'unknown')}
                 try:
@@ -54,6 +55,11 @@ def read_boards(store):
                     spdoc=Document(specific) if specific else None
                     sp=spdoc.root() if spdoc else {}
                     item.update(common=co,specific=sp)
+                    if typ==2:
+                        child_ids=get(sp,'a','ordered_values')
+                        if child_ids is not None:item['child_ids']=child_ids
+                        order_error=get(sp,'a','ordered_error')
+                        if order_error:board['warnings'].append({'item':item['id'],'message':'Native child order: '+order_error})
                     affinity=get(co,'b');general=get(affinity,0) if typ in (3,4,11,12) else affinity
                     geom=get(general,1);pos=point(get(geom,0));size=point(get(geom,1))
                     if pos is not None and size is not None:

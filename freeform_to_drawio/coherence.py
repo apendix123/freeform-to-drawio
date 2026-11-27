@@ -54,6 +54,63 @@ class Document:
    return {str(k):self.value(v) for k,v in zip(keys,vals)}
   if 15 in d:return struct.unpack('<f',first(d,15))[0]
   return {'unknown_value':b.hex()}
+ def replica(self,index):
+  start=index*16;value=self.uuids[start:start+16]
+  if len(value)!=16:raise ValueError('UUID constant out of range')
+  return value
+ def removed(self,version,timestamp):
+  version=wire(version);stamp=wire(timestamp)
+  target=self.replica(first(stamp,1,0));counter=first(stamp,2,0)
+  uuids=packed(first(version,1,b''));sets=version[2]
+  if len(uuids)!=len(sets):raise ValueError('Version vector length mismatch')
+  for replica,ranges in zip(uuids,sets):
+   values=packed(first(wire(ranges),2,b''));end=0
+   if len(values)%2:raise ValueError('Incomplete version counter range')
+   for gap,length in zip(values[::2],values[1::2]):
+    start=end+gap;end=start+length
+    if self.replica(replica)==target and start<=counter<end:return True
+  return False
+ def ordered_values(self,b):
+  ordered=wire(b)
+  if first(ordered,4,0)!=0:raise ValueError('Ordered dictionary is not a set')
+  insertions=wire(first(ordered,1,b''))[4]
+  keys=[]
+  for insertion in insertions:
+   key=first(wire(insertion),1)
+   if key is None:raise ValueError('Missing ordered-set key')
+   keys.append(key)
+  segments=[];consumed=0
+  sequence=wire(first(ordered,2,b''))
+  persistent=4 in sequence or 5 in sequence
+  for raw in sequence[3]:
+   seg=wire(raw);length=first(seg,2,0);option=first(seg,6,0)
+   if option not in (0,1):raise ValueError('Unknown sequence content option')
+   # Persistent stores elide removed ranges by omitting their added stamp;
+   # clipboard snapshots can instead use the explicit content=1 alternative.
+   elided=option==1 or (persistent and 3 not in seg)
+   end=consumed+(0 if elided else length)
+   if end>len(keys):raise ValueError('Sequence exceeds content')
+   gone=3 in seg and 5 in seg and self.removed(first(seg,5),first(seg,3))
+   segments.append((list(range(consumed,end)),packed(first(seg,4,b'')),not gone));consumed=end
+  if consumed!=len(keys):raise ValueError('Sequence content length mismatch')
+  order=[];stack=[0] if segments else [];seen=set()
+  while stack:
+   index=stack.pop()
+   if index in seen or index>=len(segments):raise ValueError('Invalid sequence tree')
+   seen.add(index);content,children,visible=segments[index]
+   if visible:order.extend(content)
+   stack.extend(reversed(children))
+  if len(seen)!=len(segments):raise ValueError('Unreachable sequence segment')
+  timestamps=ordered[3]
+  if len(timestamps)!=len(keys):raise ValueError('Ordered-set timestamp count mismatch')
+  stamps=[]
+  for stamp in timestamps:
+   stamp=wire(stamp);stamps.append((first(stamp,2,0),self.replica(first(stamp,1,0))))
+  winners={}
+  for index in order:
+   key=keys[index]
+   if key not in winners or stamps[index]>stamps[winners[key]]:winners[key]=index
+  return [self.value(keys[index]) for index in order if winners[keys[index]]==index]
  def node(self,b):
   d=wire(b)
   if 1 in d:
@@ -62,6 +119,9 @@ class Document:
    s=wire(first(d,4));keys=packed(first(s,1,b''));vals=s[2]
    if len(keys)!=len(vals):raise ValueError('composite key mismatch')
    return {self.strings[k]:self.node(v) for k,v in zip(keys,vals)}
+  if 9 in d:
+   try:return {'ordered_values':self.ordered_values(first(d,9))}
+   except ValueError as exc:return {'unknown_crdt':b.hex(),'ordered_error':str(exc)}
   if 5 in d:
    s=wire(first(d,5));return {'attributed_text':first(s,1,b'').decode(),'attribute_runs_raw':[x.hex() for x in s[6]]}
   return {'unknown_crdt':b.hex()}

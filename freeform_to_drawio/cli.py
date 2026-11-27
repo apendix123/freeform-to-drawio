@@ -46,7 +46,7 @@ def main(argv=None):
         totals=collections.Counter()
         for r in reports:totals.update(r['counts'])
         report={'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'boards':reports,'totals':dict(totals),
-                'limitations':['Experimental private Apple format; verify visual results.', 'Groups flattened; layer order approximated.', 'Connectors preserve editable contours, without automatic routing.', 'Mixed font formatting reduced to dominant values; per-run text colors are preserved.', 'Parametric paths, crops, masks, drawing and ink may require manual repair.']}
+                'limitations':['Experimental private Apple format; verify visual results.', 'Groups flattened; native paint order preserved when available (see layer_order per board).', 'Connectors preserve editable contours, without automatic routing.', 'Mixed font formatting reduced to dominant values; per-run text colors are preserved.', 'Parametric paths, crops, masks, drawing and ink may require manual repair.']}
         (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         rows=[]
         for r in reports:

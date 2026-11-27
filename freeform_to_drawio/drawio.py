@@ -28,6 +28,60 @@ def style(i):
  n=get(i,'specific','a','a','a') if i['kind']=='sticky' else get(i,'specific','a','a');n=n or {};fill=get(n,'a');stroke=get(n,'b')
  return color(get(fill,1)) if fill else 'none',color(get(stroke,1)) if stroke else 'none',get(stroke,2) or 1
 
+def stroke_options(item):
+    node=get(item,'specific','a','a','a') if item['kind']=='sticky' else get(item,'specific','a','a')
+    stroke=get(node,'b') or {}
+    dash=get(stroke,6,0) or []
+    if any(not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in dash):
+        raise ValueError('Invalid native dash pattern')
+    if dash and not any(dash):raise ValueError('Empty native dash cycle')
+    return {'dash':dash,'phase':get(stroke,6,1) or 0,
+            'cap':{0:'flat',1:'round',2:'square'}.get(get(stroke,3),'flat'),
+            'join':{0:'miter',1:'round',2:'bevel'}.get(get(stroke,4),'miter'),
+            'miter':get(stroke,5) or 4}
+
+
+def paint_color(paint):
+    """Return RGB/gray color and alpha for a CRLFillData color alternative."""
+    native=get(paint,1)
+    return color(native),get(native,0) if get(native,0) is not None else 1.0
+
+
+def escaped_text(text):
+    return html.escape(text).replace('\r\n','\n').replace('\r','\n').replace('\u2028','\n').replace('\u2029','\n').replace('\n','<br>')
+
+
+def colored_text(item):
+    """Keep per-run color; attribute ranges use UTF-16, not Python indices."""
+    default=paint_color(get(item,'text_preset',6))
+    encoded=item['text'].encode('utf-16-le');offset=0;parts=[];colors=[]
+    def append(text,paint):
+        value=escaped_text(text);hexcolor,alpha=paint
+        if not math.isfinite(alpha) or not 0<=alpha<=1:raise ValueError('Invalid text opacity')
+        if paint!=default or alpha!=1:
+            css=f'color:{hexcolor};'
+            if alpha!=1:css+=f'opacity:{alpha:g};'
+            value=f'<span style="{css}">{value}</span>'
+        parts.append(value)
+        if text:colors.append(paint)
+    runs=item.get('text_attributes',[])
+    for run in runs:
+        length=run['length']
+        if not isinstance(length,int) or length<0:raise ValueError('Invalid UTF-16 run length')
+        end=offset+length*2
+        if end>len(encoded):raise ValueError('Text run exceeds UTF-16 string')
+        try:text=encoded[offset:end].decode('utf-16-le')
+        except UnicodeDecodeError as exc:raise ValueError('Text run splits a UTF-16 surrogate pair') from exc
+        fill=run['attributes'].get('characterFill')
+        append(text,paint_color(fill) if fill is not None else default)
+        offset=end
+    if offset<len(encoded):append(encoded[offset:].decode('utf-16-le'),default)
+    # Set the cell's fallback color too, so a uniformly colored label remains
+    # colored when edited. Individual spans preserve mixed-color labels.
+    fontcolor=colors[0][0] if colors and len(set(colors))==1 else default[0]
+    return ''.join(parts),fontcolor,any(c!='#000000' for c,a in colors)
+
+
 def native_path(source):
     """Also handle editable Béziers; approximate parametric outlines explicitly."""
     cmd,natural=commands(source)
@@ -84,14 +138,23 @@ def text_metrics(item,natural):
     fontstyle=int(bool(bold))+2*int(bool(italic))+4*int(bool(underline))+8*int(bool(strike))
     return float(fs),fontstyle,align
 
-def stencil(cmd,natural,fill,markers=(),marker_color=None):
+def stencil(cmd,natural,fill,markers=(),marker_color=None,stroke_settings=None):
     w,h=natural;s=E.Element('shape',w=str(w),h=str(h),aspect='variable',strokewidth='inherit')
-    E.SubElement(s,'background');fg=E.SubElement(s,'foreground');p=E.SubElement(fg,'path')
+    E.SubElement(s,'background');fg=E.SubElement(s,'foreground')
+    if stroke_settings:
+        E.SubElement(fg,'linecap',cap=stroke_settings['cap'])
+        E.SubElement(fg,'linejoin',join=stroke_settings['join'])
+        E.SubElement(fg,'miterlimit',limit=str(stroke_settings['miter']))
+        if stroke_settings['dash']:
+            E.SubElement(fg,'dashpattern',pattern=' '.join(f'{v:g}' for v in stroke_settings['dash']))
+            E.SubElement(fg,'dashed',dashed='1')
+    p=E.SubElement(fg,'path')
     names={'move':['x','y'],'line':['x','y'],'curve':['x1','y1','x2','y2','x3','y3'],'close':[]}
     for c in cmd:E.SubElement(p,c[0],dict(zip(names[c[0]],map(str,c[1:]))))
     E.SubElement(fg,'fillstroke' if fill!='none' else 'stroke')
     for marker in markers:
         E.SubElement(fg,'save')
+        E.SubElement(fg,'dashed',dashed='0')
         E.SubElement(fg,'fillcolor',color=marker_color or '#000000')
         E.SubElement(fg,'strokecolor',color=marker_color or '#000000')
         p=E.SubElement(fg,'path')
@@ -276,7 +339,10 @@ def export_board(board,store):
                 markers,marker_warnings=line_markers(item,cmd,natural,(w,h))
                 for message in marker_warnings:warn(item,message)
                 if markers:stats['arrowheads']+=len(markers)
-                sty=f'shape=stencil({stencil(cmd,natural,fill,markers,stroke)});fillColor={fill};strokeColor={stroke};strokeWidth={width};'+pathtransform
+                stroke_settings=stroke_options(item)
+                if stroke_settings['dash']:stats['dashed_paths']+=1
+                if stroke_settings['phase']:warn(item,'Nonzero dash phase is not supported')
+                sty=f'shape=stencil({stencil(cmd,natural,fill,markers,stroke,stroke_settings)});fillColor={fill};strokeColor={stroke};strokeWidth={width};'+pathtransform
                 cell(root,item['id'],'',sty,(x,y,w,h));stats['paths']+=1
             if zero and item.get('text') == '':
                 cell(root,item['id'],'','text;fillColor=none;strokeColor=none;fontColor=#000000;',(x,y,w,h))
@@ -289,8 +355,11 @@ def export_board(board,store):
                     longest=max(map(len,item['text'].splitlines()),default=1)
                     size=min(size,max(5,(w-2*inset)/(max(longest,1)*.55)),max(5,(h-2*inset)/(max(len(item['text'].splitlines()),1)*1.2)))
                 # HTML preserves explicit line breaks without rewrapping standalone labels.
-                val='<br>'.join(html.escape(line) for line in item['text'].splitlines())
-                sty=f'text;html=1;whiteSpace=nowrap;overflow=visible;strokeColor=none;fillColor=none;fontColor=#000000;fontFamily=Helvetica;fontSize={size};fontStyle={fs};align={align};verticalAlign=middle;spacing=0;'+transform
+                try:val,fontcolor,is_colored=colored_text(item)
+                except ValueError as exc:
+                    warn(item,str(exc));val=escaped_text(item['text']);fontcolor='#000000';is_colored=False
+                if is_colored:stats['colored_texts']+=1
+                sty=f'text;html=1;whiteSpace=nowrap;overflow=visible;strokeColor=none;fillColor=none;fontColor={fontcolor};fontFamily=Helvetica;fontSize={size};fontStyle={fs};align={align};verticalAlign=middle;spacing=0;'+transform
                 cell(root,item['id']+'-text',val,sty,(x,y,w,h));stats['texts']+=1
         except (ValueError,IndexError,KeyError,TypeError,struct.error,subprocess.SubprocessError,OSError) as exc:
             stats['failed']+=1;warn(item,str(exc))

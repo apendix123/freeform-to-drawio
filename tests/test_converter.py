@@ -15,7 +15,7 @@ import zlib
 
 from freeform_to_drawio.cli import main
 from freeform_to_drawio.coherence import Document, wire
-from freeform_to_drawio.drawio import export_board, stencil
+from freeform_to_drawio.drawio import export_board, stencil, colored_text
 from freeform_to_drawio.store import snapshot
 
 def vi(n):
@@ -111,6 +111,51 @@ class ConverterTests(unittest.TestCase):
         item=shape(text='First\u2028Second\u2029Third',width=100,height=50)
         diagram,_=export_board({'id':'b','title':'Text','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
         self.assertEqual(diagram.find('.//mxCell[@id="shape-text"]').get('value'),'First<br>Second<br>Third')
+
+    def test_dotted_stencil_keeps_relative_pattern_and_round_caps(self):
+        item=shape()
+        stroke=item['specific']['a']['a']['b']
+        stroke.update({'2':3,'3':1,'6':{'0':[.001,2.0],'1':0.0}})
+        diagram,report=export_board({'id':'b','title':'Dots','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        cell=diagram.find('.//mxCell[@id="shape"]')
+        encoded=cell.get('style').split('stencil(',1)[1].split(')',1)[0]
+        foreground=E.fromstring(zlib.decompress(base64.b64decode(encoded),-15)).find('foreground')
+        self.assertEqual(foreground.find('dashpattern').get('pattern'),'0.001 2')
+        self.assertEqual(foreground.find('dashed').get('dashed'),'1')
+        self.assertEqual(foreground.find('linecap').get('cap'),'round')
+        self.assertIn('strokeWidth=3;',cell.get('style'))
+        self.assertEqual(report['counts']['dashed_paths'],1)
+
+    def test_dash_does_not_apply_to_arrowhead(self):
+        node=E.fromstring(zlib.decompress(base64.b64decode(stencil(
+            [('move',0,0),('line',100,0)],(100,1),'none',
+            [[('move',94,-3),('line',100,0),('line',94,3),('close',)]],
+            '#000000',{'dash':[1,1],'cap':'flat','join':'miter','miter':4})), -15))
+        dashed=[n.get('dashed') for n in node.findall('./foreground/dashed')]
+        self.assertEqual(dashed,['1','0'])
+
+    def test_text_colors_preserve_utf16_runs_and_html_escaping(self):
+        def paint(r,g,b):return {'0':0,'1':{'1':{'0':0,'1':r,'2':g,'3':b}}}
+        item=shape(text='A😀B<&',width=100,height=50)
+        purple=paint(120/255,44/255,246/255);orange=paint(239/255,140/255,0)
+        item['text_attributes']=[{'length':3,'attributes':{'characterFill':purple}},
+                                 {'length':3,'attributes':{'characterFill':orange}}]
+        value,fallback,colored=colored_text(item)
+        self.assertEqual(value,'<span style="color:#782cf6;">A😀</span><span style="color:#ef8c00;">B&lt;&amp;</span>')
+        self.assertEqual(fallback,'#000000');self.assertTrue(colored)
+        diagram,report=export_board({'id':'b','title':'Color','items':[item],'warnings':[]},pathlib.Path('/nonexistent'))
+        self.assertEqual(diagram.find('.//mxCell[@id="shape-text"]').get('value'),value)
+        self.assertEqual(report['counts']['colored_texts'],1)
+        item['text_attributes'][0]['length']=2
+        with self.assertRaisesRegex(ValueError,'surrogate pair'):colored_text(item)
+
+    def test_preset_color_and_run_opacity(self):
+        item=shape(text='Plain',width=100,height=50)
+        item['text_preset']['6']={'0':0,'1':{'1':{'0':0,'1':1,'2':.5,'3':0}}}
+        value,fallback,colored=colored_text(item)
+        self.assertEqual(value,'Plain');self.assertEqual(fallback,'#ff8000');self.assertTrue(colored)
+        item['text_attributes']=[{'length':5,'attributes':{'characterFill':{'0':0,'1':{'0':.5,'1':{'0':0,'1':0,'2':0,'3':0}}}}}]
+        self.assertIn('opacity:0.5;',colored_text(item)[0])
 
     def test_image_is_embedded_without_external_url(self):
         with tempfile.TemporaryDirectory() as td:

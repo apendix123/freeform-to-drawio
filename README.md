@@ -54,7 +54,7 @@ freeform-to-drawio --output exports/my-boards
 - `report.json`: counts, approximations, unsupported objects and decode/export failures.
 - `snapshot/`: local backup of the database and assets, retained for recovery and investigation.
 
-Open a `.drawio` file using **File → Open from → Device** in draw.io. The files force light-mode diagram colors and explicit black text, so a dark editor theme does not invert them. Standalone labels preserve explicit line breaks rather than automatically wrapping.
+Open a `.drawio` file using **File → Open from → Device** in draw.io. The files force light-mode diagram colors and explicit source text colors (black when absent), so a dark editor theme does not invert them. Standalone labels preserve explicit line breaks rather than automatically wrapping.
 
 ## Fidelity and current limitations
 
@@ -63,7 +63,8 @@ This is an experimental migration tool, not a pixel-perfect Freeform renderer. I
 | Feature | Current behavior |
 | --- | --- |
 | Shapes | Native Bézier paths become editable, resizable draw.io stencils. |
-| Text | Editable labels, native dominant font size/style and alignment. Mixed character formatting is simplified. Platform font defaults and shrink-to-fit are approximate. |
+| Text | Editable labels, native dominant font size/style and alignment. Per-run colors and opacity are preserved; mixed font formatting is simplified. Platform font defaults and shrink-to-fit are approximate. |
+| Dashes and dots | Native relative dash patterns, round caps for dots, and stroke joins. Nonzero dash phase is reported as unsupported. Arrowheads stay solid. |
 | Straight lines | Preserved even when their native frame has zero width or height. |
 | Connectors | Editable contours with reconstructed smoothing. They do **not** automatically attach or reroute when a node moves. Archived arrowhead paths are preserved at their endpoints. Exact routing may differ. |
 | Groups | Flattened into objects, with ancestral translation/rotation applied. Native layer order, group scaling/flips and complex transforms may differ. |
@@ -82,6 +83,6 @@ python3 -m unittest discover -s tests -v
 python3 examples/make_demo.py
 ```
 
-Tests use synthetic data only: Unicode, malformed protobuf, zero-extent lines, HTML text escaping, embedded images, duplicate board titles, output protection, WAL-aware snapshots, native rotation direction, head/tail arrowheads and Unicode line separators. `examples/demo.drawio` is entirely artificial. No personal Freeform captures are included.
+Tests use synthetic data only: Unicode, malformed protobuf, zero-extent lines, HTML text escaping, embedded images, duplicate board titles, output protection, WAL-aware snapshots, native rotation direction, head/tail arrowheads Unicode line separators, dash/dot patterns, colored UTF-16 runs and text opacity. `examples/demo.drawio` is entirely artificial. No personal Freeform captures are included.
 
 MIT license. Adapted schema mappings retain the upstream MIT notice in `THIRD_PARTY_NOTICES`.

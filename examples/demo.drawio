@@ -1,0 +1,23 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="freeform-to-drawio" version="0.1.0">
+  <diagram id="synthetic-example" name="Synthetic demo">
+    <mxGraphModel adaptiveColors="none" background="#ffffff" page="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="source" value="Source" style="rounded=1;fillColor=#5ac4f6;strokeColor=#000000;fontColor=#000000;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="60" width="140" height="60" />
+        </mxCell>
+        <mxCell id="target" value="Destination" style="rounded=1;fillColor=#ef8c00;strokeColor=#000000;fontColor=#000000;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="300" y="60" width="140" height="60" />
+        </mxCell>
+        <mxCell id="link" edge="1" parent="1" source="source" target="target" style="endArrow=block;strokeColor=#000000;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="label" value="Artificial example · Пример" style="text;html=0;fontColor=#000000;strokeColor=none;fillColor=none;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="160" width="400" height="40" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

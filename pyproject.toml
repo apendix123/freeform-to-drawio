@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freeform-to-drawio"
+version = "0.1.0"
+description = "Local, experimental Apple Freeform SQLite to editable draw.io converter"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+readme = "README.md"
+dependencies = []
+
+[project.scripts]
+freeform-to-drawio = "freeform_to_drawio.cli:main"
+
+[tool.setuptools]
+packages = ["freeform_to_drawio"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]

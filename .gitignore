@@ -1,0 +1,18 @@
+# Local source data and exports must never be published.
+/research/
+/output/
+/tools/
+/snapshots/
+/exports/
+/dist/
+/build/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+*.pdf
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.DS_Store

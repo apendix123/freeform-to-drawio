@@ -1,0 +1,230 @@
+"""Editable native paths, text, and embedded images in draw.io XML."""
+import base64, collections, html, json, math, mimetypes, pathlib, struct, subprocess, tempfile, zlib
+import xml.etree.ElementTree as E
+from .coherence import get, point, wire, first
+def pair(b):
+ return (0,0) if not b else struct.unpack('<ff' if len(b)==8 else '<ee',b)
+def commands(source):
+ bez=get(source,6) or get(source,8,1)
+ if not bez:return [],None
+ raw=get(bez,0,'bytes');natural=point(get(bez,1))
+ result=[]
+ for v in wire(bytes.fromhex(raw))[1]:
+  d=wire(v);kind=first(d,1,0);p=pair(first(d,2,b''))
+  if kind==2:
+   c1=pair(first(d,3,b''));c2=pair(first(d,4,b''));result.append(('curve',p[0]+c1[0],p[1]+c1[1],p[0]+c2[0],p[1]+c2[1],*p))
+  elif kind in (0,1):result.append(('move' if kind==0 else 'line',*p))
+  elif kind==3:result.append(('close',))
+  else:raise ValueError(kind)
+ return result,natural
+def color(c):
+ rgb=get(c,1)
+ if rgb:return '#'+''.join(f'{round(max(0,min(1,get(rgb,k) or 0))*255):02x}' for k in (1,2,3))
+ mono=get(c,3,0)
+ if mono is not None:return '#'+f'{round(mono*255):02x}'*3
+ return '#000000'
+def style(i):
+ n=get(i,'specific','a','a','a') if i['kind']=='sticky' else get(i,'specific','a','a');n=n or {};fill=get(n,'a');stroke=get(n,'b')
+ return color(get(fill,1)) if fill else 'none',color(get(stroke,1)) if stroke else 'none',get(stroke,2) or 1
+
+def native_path(source):
+    """Also handle editable Béziers; approximate parametric outlines explicitly."""
+    cmd,natural=commands(source)
+    if cmd:return cmd,natural,None
+    editable=get(source,9)
+    if editable:
+        cmd=[]
+        for sub in get(editable,1) or []:
+            nodes=get(sub,0) or []
+            if not nodes:continue
+            start=point(get(nodes[0],1));cmd.append(('move',*start))
+            pairs=list(zip(nodes,nodes[1:]))
+            if get(sub,1):pairs.append((nodes[-1],nodes[0]))
+            for a,b in pairs:
+                p=point(get(b,1));out=point(get(a,2));inc=point(get(b,0))
+                cmd.append(('line',*p) if out==point(get(a,1)) and inc==p else ('curve',*out,*inc,*p))
+            if get(sub,1):cmd.append(('close',))
+        return cmd,point(get(editable,2)),None
+    for key,sizekey in ((4,2),(5,2),(7,4)):
+        value=get(source,key)
+        if value:
+            size=point(get(value,sizekey))
+            if size:
+                w,h=size
+                return [('move',0,0),('line',w,0),('line',w,h),('line',0,h),('close',)],size,'Parametric shape approximated by bounding rectangle'
+    return [],None,'Unsupported or absent path source'
+
+def smooth_connection(cmd,source):
+    if get(source,8,0)!=0 or len(cmd)<3 or not all(c[0] in ('move','line') for c in cmd):return cmd
+    pts=[c[1:] for c in cmd];out=[('move',*pts[0])];start=pts[0]
+    for j,control in enumerate(pts[1:-1],1):
+        end=pts[-1] if j==len(pts)-2 else tuple((a+b)/2 for a,b in zip(control,pts[j+1]))
+        c1=tuple(a+2*(b-a)/3 for a,b in zip(start,control));c2=tuple(a+2*(b-a)/3 for a,b in zip(end,control))
+        out.append(('curve',*c1,*c2,*end));start=end
+    return out
+
+def text_metrics(item,natural):
+    preset=item.get('text_preset',{});runs=item.get('text_attributes',[])
+    attrs=collections.Counter()
+    for r in runs:
+        for k,v in r['attributes'].items():
+            if isinstance(v,(str,int,float)):attrs[(k,v)]+=max(r['length'],1)
+    def attribute(key,default):
+        values=[(n,v) for (k,v),n in attrs.items() if k==key]
+        return max(values,key=lambda x:x[0])[1] if values else default
+    fs=attribute('fontSize',get(preset,1) or 18)
+    bold=attribute('bold',bool(get(preset,2)));italic=attribute('italic',bool(get(preset,3)))
+    underline=attribute('underline',get(preset,4) or 0);strike=attribute('strikethrough',get(preset,5) or 0)
+    # Freeform caches a text outline even when automatic layout stores zero frame size.
+    if not any(k=='fontSize' for k,v in attrs) and natural and item['geometry']['width']==0:
+        lines=max(len(item.get('text','').splitlines()),1)
+        fs=max(5,(natural[1]-8)/(1.17*lines))
+    align={0:'left',1:'right',2:'center',3:'left',4:'left'}.get(attribute('paragraphAlignment',get(preset,7)), 'center')
+    fontstyle=int(bool(bold))+2*int(bool(italic))+4*int(bool(underline))+8*int(bool(strike))
+    return float(fs),fontstyle,align
+
+def stencil(cmd,natural,fill):
+    w,h=natural;s=E.Element('shape',w=str(w),h=str(h),aspect='variable',strokewidth='inherit')
+    E.SubElement(s,'background');fg=E.SubElement(s,'foreground');p=E.SubElement(fg,'path')
+    names={'move':['x','y'],'line':['x','y'],'curve':['x1','y1','x2','y2','x3','y3'],'close':[]}
+    for c in cmd:E.SubElement(p,c[0],dict(zip(names[c[0]],map(str,c[1:]))))
+    E.SubElement(fg,'fillstroke' if fill!='none' else 'stroke')
+    co=zlib.compressobj(wbits=-15)
+    return base64.b64encode(co.compress(E.tostring(s))+co.flush()).decode()
+
+def cell(root,id,value,sty,box):
+    x,y,w,h=box
+    if not all(math.isfinite(v) for v in box) or w<=0 or h<=0:raise ValueError('Invalid output geometry')
+    c=E.SubElement(root,'mxCell',id=id,value=value,style=sty,vertex='1',parent='1')
+    E.SubElement(c,'mxGeometry',x=str(x),y=str(y),width=str(w),height=str(h),attrib={'as':'geometry'})
+    return c
+
+def assets_index(store):
+    return {p.stem.lower():p for p in (pathlib.Path(store)/'Assets').glob('*') if p.is_file()}
+
+def image_data(path):
+    mime=mimetypes.guess_type(path.name)[0]
+    if mime in ('image/png','image/jpeg','image/gif','image/svg+xml','image/webp'):
+        data=path.read_bytes()
+    elif path.suffix.lower() in ('.tiff','.tif','.heic'):
+        with tempfile.TemporaryDirectory(prefix='freeform-image-') as temp:
+            dest=pathlib.Path(temp)/'image.png'
+            subprocess.run(['/usr/bin/sips','-s','format','png',str(path),'--out',str(dest)],check=True,capture_output=True)
+            data=dest.read_bytes();mime='image/png'
+    else:raise ValueError('Unsupported image format: '+path.suffix)
+    return 'data:'+mime+','+base64.b64encode(data).decode()
+
+def export_board(board,store):
+    diagram=E.Element('diagram',name=board['title'],id=board['id'])
+    model=E.SubElement(diagram,'mxGraphModel',grid='1',gridSize='10',page='0',adaptiveColors='none',background='#ffffff')
+    root=E.SubElement(model,'root');E.SubElement(root,'mxCell',id='0');E.SubElement(root,'mxCell',id='1',parent='0')
+    warnings=list(board['warnings']);stats=collections.Counter();assets=assets_index(store)
+    items={i['id']:i for i in board['items']}
+    def warn(i,msg):warnings.append({'item':i['id'],'message':msg})
+    def ancestors(item):
+        chain=[];seen={item['id']};parent=item['parent']
+        while parent and parent in items:
+            if parent in seen:raise ValueError('Cyclic group ancestry')
+            seen.add(parent);p=items[parent]
+            if p['parent'] is not None:chain.append(p)
+            parent=p['parent']
+        return chain
+    def world(item,x,y):
+        angle=item['geometry'].get('rotation',0)
+        for group in ancestors(item):
+            g=group.get('geometry')
+            if not g:continue
+            # Native group coordinates are affine local coordinates; unit group frames
+            # do not provide bounds. Preserve translation and rotation, flatten hierarchy.
+            theta=math.radians(g.get('rotation',0));x,y=x*math.cos(theta)-y*math.sin(theta)+g['x'],x*math.sin(theta)+y*math.cos(theta)+g['y'];angle+=g.get('rotation',0)
+        return x,y,angle
+    def layer(i):
+        if i.get('text') and i.get('geometry',{}).get('width')==0:return 3
+        if i['kind']=='connector':return 1
+        if i['kind']=='image':return 2
+        return 2 if style(i)[0]!='none' else 0
+    for item in sorted(board['items'],key=layer):
+        if item['kind']=='container':stats['containers_flattened']+=1;continue
+        try:
+            if item.get('error'):raise ValueError(item['error'])
+            g=item.get('geometry')
+            if not g:raise ValueError('Missing geometry')
+            x,y,rotation=world(item,g['x'],g['y']);w,h=g['width'],g['height']
+            transform=f'rotation={rotation};'
+            if g.get('flipH'):transform+='flipH=1;'
+            if g.get('flipV'):transform+='flipV=1;'
+            if item['kind']=='image':
+                aid=get(item,'specific','a',0,0);p=assets.get(str(aid).lower())
+                if not p:raise ValueError('Image asset not found: '+str(aid))
+                data=image_data(p)
+                cell(root,item['id'],'',f'shape=image;image={data};imageAspect=0;strokeColor=none;fillColor=none;'+transform,(x,y,w,h));stats['images']+=1
+                mask=get(item,'specific','c')
+                if mask:warn(item,'Image crop/mask may differ; source image embedded in frame')
+                continue
+            if item['kind'] not in ('shape','sticky','connector','ink'):
+                cell(root,item['id'],f"[{item['kind']} - unsupported]",'rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#000000;', (x,y,max(w,120),max(h,40)))
+                stats['placeholders']+=1;warn(item,'Unsupported item retained as labelled placeholder');continue
+            source=get(item,'common','b',1);cmd,natural,notice=native_path(source)
+            if notice:warn(item,notice)
+            if not cmd or not natural:
+                if not item.get('text'):raise ValueError('No supported path or text')
+                natural=[max(30,len(item['text'])*10),30]
+            if item['kind']=='connector':cmd=smooth_connection(cmd,source)
+            zero=w==0 and h==0
+            if zero:
+                w,h=natural;x-=w/2;y-=h/2
+            # A straight native line legitimately has a zero extent on one axis.
+            # Give its stencil a one-point box and center that axis, without dropping it.
+            if not zero and (w==0 or h==0 or natural[0]==0 or natural[1]==0):
+                zw=natural[0]==0;zh=natural[1]==0
+                adjusted=[]
+                for c in cmd:
+                    values=list(c[1:])
+                    for k in range(len(values)):
+                        if (k%2==0 and zw) or (k%2==1 and zh):values[k]+=.5
+                    adjusted.append((c[0],*values))
+                cmd=adjusted;natural=[max(natural[0],1),max(natural[1],1)]
+                if w==0:x-=.5;w=1
+                if h==0:y-=.5;h=1
+            if (w<=0 or h<=0) and item.get('text'):
+                size=get(item,'text_preset',1) or 18
+                w=max(30,max(map(len,item['text'].splitlines()),default=1)*size*.55+8)
+                h=max(1,len(item['text'].splitlines()))*size*1.17+8
+                natural=[w,h];x=g['x']-w/2;y=g['y']-h/2
+                x,y,rotation=world(item,x,y)
+                warn(item,'Missing cached text bounds; estimated from font size')
+            if w<=0 or h<=0:raise ValueError('Nonpositive frame')
+            fill,stroke,width=style(item)
+            if cmd and not zero:
+                pathtransform=transform
+                if get(source,0):pathtransform+='flipH=1;'
+                if get(source,1):pathtransform+='flipV=1;'
+                sty=f'shape=stencil({stencil(cmd,natural,fill)});fillColor={fill};strokeColor={stroke};strokeWidth={width};'+pathtransform
+                cell(root,item['id'],'',sty,(x,y,w,h));stats['paths']+=1
+            if zero and item.get('text') == '':
+                cell(root,item['id'],'','text;fillColor=none;strokeColor=none;fontColor=#000000;',(x,y,w,h))
+                stats['empty_labels']+=1
+            if item.get('text'):
+                size,fs,align=text_metrics(item,natural)
+                if not zero and get(item,'text_style','c'):
+                    # Approximate shrink-to-fit only; exact Apple font metrics are unavailable.
+                    inset=get(item,'text_style','a') or 0
+                    longest=max(map(len,item['text'].splitlines()),default=1)
+                    size=min(size,max(5,(w-2*inset)/(max(longest,1)*.55)),max(5,(h-2*inset)/(max(len(item['text'].splitlines()),1)*1.2)))
+                # HTML preserves explicit line breaks without rewrapping standalone labels.
+                val=html.escape(item['text']).replace('\n','<br>')
+                sty=f'text;html=1;whiteSpace=nowrap;overflow=visible;strokeColor=none;fillColor=none;fontColor=#000000;fontFamily=Helvetica;fontSize={size};fontStyle={fs};align={align};verticalAlign=middle;spacing=0;'+transform
+                cell(root,item['id']+'-text',val,sty,(x,y,w,h));stats['texts']+=1
+        except (ValueError,IndexError,KeyError,TypeError,struct.error,subprocess.SubprocessError,OSError) as exc:
+            stats['failed']+=1;warn(item,str(exc))
+    # Shift all cells into a positive canvas, preserving relative positions.
+    geometries=root.findall('./mxCell/mxGeometry')
+    dx=40-min((float(g.get('x')) for g in geometries),default=0)
+    dy=40-min((float(g.get('y')) for g in geometries),default=0)
+    for g in geometries:g.set('x',str(float(g.get('x'))+dx));g.set('y',str(float(g.get('y'))+dy))
+    return diagram,{'id':board['id'],'title':board['title'],'source_items':len(board['items']),'counts':dict(stats),'warnings':warnings}
+
+def write_file(diagrams,path):
+    root=E.Element('mxfile',host='freeform-to-drawio',version='0.1.0')
+    for d in diagrams:root.append(d)
+    E.indent(root);E.ElementTree(root).write(path,encoding='utf-8',xml_declaration=True)
